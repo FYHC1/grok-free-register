@@ -44,3 +44,7 @@ docs/目录说明.md
 *.local.md
 NOTES.md
 private/
+
+# local tooling (not for open source)
+.tools/
+
