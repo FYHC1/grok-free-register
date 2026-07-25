@@ -24,8 +24,7 @@ scripts/probe_*.py
 scripts/win_*smoke*.py
 scripts/cfworker.env.snippet
 
-# vendored third-party
-GrokPool-main/
+# vendored third-party copies (do not commit)
 deploy/**/node_modules/
 deploy/**/.wrangler/
 
@@ -47,4 +46,5 @@ private/
 
 # local tooling (not for open source)
 .tools/
+
 
