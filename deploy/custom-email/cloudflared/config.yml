@@ -1,0 +1,9 @@
+# Replace TUNNEL_ID with your cloudflared tunnel id.
+# credentials-file path is machine-local; do not commit real credentials JSON.
+tunnel: YOUR_TUNNEL_ID
+credentials-file: C:\Users\YOUR_USER\.cloudflared\YOUR_TUNNEL_ID.json
+
+ingress:
+  - hostname: hook.example.com
+    service: http://127.0.0.1:8080
+  - service: http_status:404

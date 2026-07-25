@@ -1,0 +1,46 @@
+__pycache__/
+*.pyc
+.env
+keys/
+auth-local/
+*.log
+logs/
+*.bak
+.venv/
+.setup.lock/
+.DS_Store
+.pytest_cache/
+xai-enroller-ledger.db*
+tmp_*.py
+scripts/_*.py
+scripts/_*.sh
+scripts/_*.js
+scripts/_*.html
+scripts/_*.json
+scripts/_*.err
+scripts/_*.out
+scripts/_*.pid
+scripts/probe_*.py
+scripts/win_*smoke*.py
+scripts/cfworker.env.snippet
+
+# vendored third-party
+GrokPool-main/
+deploy/**/node_modules/
+deploy/**/.wrangler/
+
+# runtime noise
+oauth_smoke*
+oauth_enroll_last.json
+accounts.txt
+grok.txt
+
+# personal local tutorials / notes (not for open source)
+本地部署使用说明.md
+完整使用教程.md
+一页速查.md
+docs/目录说明.md
+新建文本文档.txt
+*.local.md
+NOTES.md
+private/
