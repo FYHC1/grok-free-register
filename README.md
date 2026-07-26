@@ -53,7 +53,7 @@ Windows / Linux 可用的 Grok 免费账号**注册**与 **OAuth 授权**工具�
 ## 快速开始
 
 ```bash
-git clone <your-repo-url>
+git clone https://github.com/li2895/grok-free-register.git
 cd grok-free-register
 python -m venv .venv
 
@@ -148,3 +148,5 @@ A: 本仓库基于 [hechuyi/grok-free-register](https://github.com/hechuyi/grok-
 ## 贡献
 
 欢迎 Issue / PR：修 bug、补文档、适配接口变更。请勿在 PR 中提交真实密钥、账号会话或授权文件。
+
+

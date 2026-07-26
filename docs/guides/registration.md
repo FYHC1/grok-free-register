@@ -5,7 +5,7 @@
 ## 开始运行
 
 ```bash
-git clone <your-repo-url>
+git clone https://github.com/li2895/grok-free-register.git
 cd grok-free-register
 bash start.sh
 ```
@@ -54,4 +54,6 @@ bash start.sh --email-service
 性能参数默认会根据 CPU 和可用内存估算。除非正在压测，否则保持 `.env.example` 中的默认值即可。
 
 成功结果写入 `keys/accounts.txt`、`keys/grok.txt` 和 `keys/auth-sessions.jsonl`；这些文件默认不提交到 Git。
+
+
 
