@@ -397,6 +397,16 @@ def sso_to_token(sso: str, proxy: str = "") -> dict:
         raise ConvertError("空 SSO")
 
     session = new_session(proxy)
+    try:
+        return _run_sso_exchange(session, sso)
+    finally:
+        try:
+            session.close()
+        except Exception:
+            pass
+
+
+def _run_sso_exchange(session, sso: str) -> dict:
     set_sso_cookies(session, sso)
 
     verifier = random_b64url(32)

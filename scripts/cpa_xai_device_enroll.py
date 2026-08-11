@@ -306,8 +306,13 @@ def append_enroll_ledger(
         for k, v in extra.items():
             if k not in row:
                 row[k] = v
-    with path.open("a", encoding="utf-8") as f:
-        f.write(json.dumps(row, ensure_ascii=False) + "\n")
+    try:
+        from scripts.append_locked import locked_append
+
+        locked_append(path, json.dumps(row, ensure_ascii=False))
+    except Exception:
+        with path.open("a", encoding="utf-8") as f:
+            f.write(json.dumps(row, ensure_ascii=False) + "\n")
 
 
 class CPAClient:
@@ -603,11 +608,21 @@ def save_local_auth_json(content: bytes, auth_dir: Path, preferred_name: str | N
             "source": "cpa_xai_device_enroll",
             "file": name,
         }
-        with (keys / "oauth_credentials.jsonl").open("a", encoding="utf-8") as f:
-            f.write(json.dumps(line, ensure_ascii=False) + "\n")
+        try:
+            from scripts.append_locked import locked_append
+
+            locked_append(keys / "oauth_credentials.jsonl", json.dumps(line, ensure_ascii=False))
+        except Exception:
+            with (keys / "oauth_credentials.jsonl").open("a", encoding="utf-8") as f:
+                f.write(json.dumps(line, ensure_ascii=False) + "\n")
         if doc.get("refresh_token") and doc.get("email"):
-            with (keys / "refresh_tokens.txt").open("a", encoding="utf-8") as f:
-                f.write(f"{doc.get('email')}\t{doc.get('refresh_token')}\n")
+            try:
+                from scripts.append_locked import locked_append
+
+                locked_append(keys / "refresh_tokens.txt", f"{doc.get('email')}\t{doc.get('refresh_token')}")
+            except Exception:
+                with (keys / "refresh_tokens.txt").open("a", encoding="utf-8") as f:
+                    f.write(f"{doc.get('email')}\t{doc.get('refresh_token')}\n")
     return path
 
 
@@ -626,10 +641,8 @@ def maybe_import_grok2api(paths: list[Path]) -> dict[str, Any]:
         cmd = [
             sys.executable,
             str(g2a_script),
-            "--auth-dir",
-            str(paths[0].parent),
-            "--limit",
-            str(len(paths)),
+            "--files",
+            *[str(p) for p in paths],
         ]
         proc = subprocess.run(cmd, cwd=str(ROOT), capture_output=True, text=True)
         return {
@@ -639,7 +652,7 @@ def maybe_import_grok2api(paths: list[Path]) -> dict[str, Any]:
             "stderr": (proc.stderr or "")[-1000:],
         }
     # If importable main exists, call with argv
-    argv = ["--auth-dir", str(paths[0].parent), "--limit", str(len(paths))]
+    argv = ["--files", *[str(p) for p in paths]]
     try:
         code = g2a_main(argv)
         return {"skipped": False, "returncode": code}

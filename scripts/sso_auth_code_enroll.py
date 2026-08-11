@@ -280,8 +280,13 @@ def append_ledger(path: Path, *, email: str, status: str, stage: str = "", error
     }
     if index is not None:
         row["index"] = index
-    with path.open("a", encoding="utf-8") as f:
-        f.write(json.dumps(row, ensure_ascii=False) + "\n")
+    try:
+        from scripts.append_locked import locked_append
+
+        locked_append(path, json.dumps(row, ensure_ascii=False))
+    except Exception:
+        with path.open("a", encoding="utf-8") as f:
+            f.write(json.dumps(row, ensure_ascii=False) + "\n")
 
 
 def collect_existing(auth_dir: Path, cpa: "CPAClient | None") -> set[str]:
@@ -320,11 +325,13 @@ class CPAClient:
     def __init__(self, base_url: str, secret: str, timeout: float = 60.0):
         self.base_url = base_url.rstrip("/")
         self.secret = secret
-        proxy = proxy_url() or None
+        # CPA 是本机/局域网服务，必须直连。env 里可能配置了 HTTP(S)_PROXY(Clash),
+        # httpx 默认 trust_env=True 会读环境变量并把 192.168.x 私有地址也发往代理,
+        # Clash 对私有地址返回 502。必须显式 trust_env=False 才能直连。
         self.client = httpx.Client(
             timeout=timeout,
-            proxy=proxy,
             follow_redirects=False,
+            trust_env=False,
             headers={
                 "Authorization": f"Bearer {secret}",
                 "X-Management-Key": secret,
@@ -475,7 +482,50 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--no-ledger", action="store_true")
     p.add_argument("--max-consecutive-fail", type=int, default=0)
     p.add_argument("--json-out", default="")
+    p.add_argument("--import-grok2api", action="store_true", help="import authorized json into local Grok2API")
     return p
+
+
+def maybe_import_grok2api(paths: list[Path]) -> dict[str, Any]:
+    """Import local auth files into Grok2API.
+
+    Tries direct import first, falls back to subprocess.
+    Mirrors the same function in cpa_xai_device_enroll.py.
+    """
+    if not paths:
+        return {"skipped": True, "reason": "no_files"}
+    try:
+        from scripts.import_authenticated_to_grok2api import main as g2a_main  # type: ignore
+    except Exception:
+        # fallback: spawn module if import path differs
+        g2a_script = ROOT / "scripts" / "import_authenticated_to_grok2api.py"
+        if not g2a_script.exists():
+            return {"skipped": True, "reason": "import_script_missing"}
+        import subprocess
+
+        cmd = [
+            sys.executable,
+            str(g2a_script),
+            "--files",
+            *[str(p) for p in paths],
+        ]
+        proc = subprocess.run(cmd, cwd=str(ROOT), capture_output=True, text=True)
+        return {
+            "skipped": False,
+            "returncode": proc.returncode,
+            "stdout": (proc.stdout or "")[-1000:],
+            "stderr": (proc.stderr or "")[-1000:],
+        }
+    # If importable main exists, call with argv
+    argv = ["--files", *[str(p) for p in paths]]
+    try:
+        code = g2a_main(argv)
+        return {"skipped": False, "returncode": code}
+    except TypeError:
+        code = g2a_main()
+        return {"skipped": False, "returncode": code}
+    except Exception as exc:
+        return {"skipped": True, "reason": f"import_failed:{exc}"}
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -550,6 +600,9 @@ def main(argv: list[str] | None = None) -> int:
     else:
         log("CPA upload disabled (local-only; pass --upload-cpa to enable)")
 
+    import_grok2api = bool(getattr(args, "import_grok2api", False))
+    imported_paths: list[Path] = []
+
     ok_n = fail_n = skip_n = 0
     results: list[dict[str, Any]] = []
     consecutive_fail = 0
@@ -623,6 +676,9 @@ def main(argv: list[str] | None = None) -> int:
                 failed.discard(email_l)
                 if use_ledger and ledger_path is not None:
                     append_ledger(ledger_path, email=email_l, status="ok", stage="done", index=idx)
+                path_str = str(result.get("path") or "")
+                if import_grok2api and path_str:
+                    imported_paths.append(Path(path_str))
                 log(f"[OK] {email} referrer={result.get('referrer')} path={result.get('path')}")
             else:
                 fail_n += 1
@@ -647,6 +703,28 @@ def main(argv: list[str] | None = None) -> int:
     finally:
         if cpa is not None:
             cpa.close()
+
+    if import_grok2api:
+        g2a_result: dict[str, Any] = {"skipped": True, "reason": "no_files"}
+        if not imported_paths:
+            # 没有新授权账号时，扫描已有文件
+            for p in sorted(auth_dir.glob("xai-*.json")):
+                imported_paths.append(p)
+        if imported_paths:
+            log(f"importing {len(imported_paths)} auth file(s) into Grok2API ...")
+            g2a_result = maybe_import_grok2api(imported_paths)
+        if g2a_result.get("skipped"):
+            log(f"[grok2api] skipped: {g2a_result.get('reason')}")
+        elif g2a_result.get("returncode", -1) == 0:
+            log("[grok2api] import OK")
+        else:
+            log(f"[grok2api] import failed: rc={g2a_result.get('returncode')}")
+            stderr = g2a_result.get("stderr", "") or ""
+            stdout = g2a_result.get("stdout", "") or ""
+            if stderr:
+                log(f"[grok2api] stderr: {stderr[-500:]}")
+            if stdout:
+                log(f"[grok2api] stdout: {stdout[-500:]}")
 
     summary = {"ok": ok_n, "fail": fail_n, "skip": skip_n, "results": results, "mode": "auth_code"}
     print(json.dumps({"ok": ok_n, "fail": fail_n, "skip": skip_n, "mode": "auth_code"}, ensure_ascii=False), flush=True)

@@ -18,6 +18,8 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent
 
+LOCK_FILE = ROOT / "keys" / ".lock-register"
+
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p = argparse.ArgumentParser(
@@ -45,6 +47,16 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
 
 def main(argv: list[str] | None = None) -> int:
     args = parse_args(argv)
+
+    # 单实例锁：防止重复启动导致双批次并发写同一 SSO 文件
+    try:
+        from scripts.single_instance import acquire_single_instance
+
+        if not acquire_single_instance(LOCK_FILE, "注册"):
+            return 3
+    except Exception as exc:
+        print(f"[!] 单实例锁不可用（{exc}），继续运行", flush=True)
+
     conc = int(args.concurrency or 0)
     if conc <= 0:
         conc = 1

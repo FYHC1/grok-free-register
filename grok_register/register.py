@@ -624,7 +624,7 @@ async def fetch_config():
                 STATE_TREE = quote(decoded[f_start:end_idx].replace('\\\\"', '"').replace('\\', ''), safe='')
                 debug_log(f'[+] STATE_TREE: {STATE_TREE[:50]}...')
                 break
-            js_urls = re.findall(r'src="(/_next/static/[^"]+\.js)"', html)
+            js_urls = re.findall(r'src="(/_next/static/[^"]+\.js[^"]*)"', html)
             for js_url in js_urls[:50]:
                 try:
                     js = await page.evaluate(f"(async()=>{{return await fetch('{js_url}').then(r=>r.text()).catch(()=>\"\" )}})()")
@@ -640,7 +640,15 @@ async def fetch_config():
         finally:
             await browser.close()
     if not all([SITE_KEY, ACTION_ID, STATE_TREE]):
-        raise RuntimeError("Config fetch failed")
+        if "Blocked due to abusive traffic" in html or "challenge-platform" in html:
+            raise RuntimeError(
+                "Config fetch failed: Cloudflare blocked this proxy IP (abusive traffic). "
+                "换代理节点或等待风控解除后重试。"
+            )
+        raise RuntimeError(
+            f"Config fetch failed: SITE_KEY={bool(SITE_KEY)} ACTION_ID={bool(ACTION_ID)} "
+            f"STATE_TREE={bool(STATE_TREE)} page_len={len(html)}"
+        )
 
 
 # ──────────────────────────────────────────────
@@ -2763,11 +2771,18 @@ def _pair_is_expired(pair, now=None):
 
 
 def _append_registration_line(path, line, mode=None, *, durable=False):
-    with open(path, "a") as stream:
-        stream.write(line)
-        if durable:
-            stream.flush()
-            os.fsync(stream.fileno())
+    """追加一行到 keys/ 文件。带跨进程文件锁，防止多 worker / 双批次并发写交错。"""
+    try:
+        import scripts.append_locked as al
+
+        al.locked_append(path, line, durable=durable)
+    except Exception:
+        # 锁不可用（scripts 不在 sys.path 等）时回退普通追加，不阻塞注册
+        with open(path, "a") as stream:
+            stream.write(line)
+            if durable:
+                stream.flush()
+                os.fsync(stream.fileno())
     if mode is not None:
         os.chmod(path, mode)
 

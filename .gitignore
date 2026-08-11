@@ -47,6 +47,9 @@ private/
 # local tooling (not for open source)
 .tools/
 
+# opencode / agent runtime state
+.omo/
+
 
 
 push-github.cmd

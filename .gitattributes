@@ -1,0 +1,31 @@
+# 统一行尾策略：本仓库文件以 CRLF 存储（Windows 为主要开发环境）
+# 该声明使 git 不再把 CRLF/LF 差异视为内容变更，消除"全仓库假 diff"。
+
+* text=auto
+
+*.py text eol=crlf
+*.cmd text eol=crlf
+*.bat text eol=crlf
+*.ps1 text eol=crlf
+*.sh text eol=lf
+*.json text eol=crlf
+*.md text eol=crlf
+*.yml text eol=crlf
+*.yaml text eol=crlf
+*.toml text eol=crlf
+*.ini text eol=crlf
+*.example text eol=crlf
+*.js text eol=crlf
+*.ts text eol=crlf
+*.txt text eol=crlf
+*.html text eol=crlf
+*.css text eol=crlf
+
+# 二进制文件不做行尾转换
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.ico binary
+*.pdf binary
+*.drawio binary
