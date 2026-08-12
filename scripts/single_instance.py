@@ -17,25 +17,29 @@ import atexit
 import os
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 
 def _pid_alive(pid: int) -> bool:
+    """判断 PID 是否存活。
+
+    Windows 用 OpenProcess（同步 API，无 tasklist 的登记延迟）；
+    失败码 87(ERROR_INVALID_PARAMETER)/128 视为进程不存在。
+    POSIX 用 os.kill(pid, 0)。
+    """
     if pid <= 0:
         return False
     if sys.platform == "win32":
-        try:
-            r = subprocess.run(
-                ["tasklist", "/FI", f"PID eq {pid}", "/NH"],
-                capture_output=True,
-                text=True,
-                encoding="utf-8",
-                errors="replace",
-                timeout=15,
-            )
-            return str(pid) in (r.stdout or "")
-        except Exception:
-            return False
+        import ctypes
+
+        PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
+        open_proc = ctypes.WinDLL("kernel32", use_last_error=True).OpenProcess
+        handle = open_proc(PROCESS_QUERY_LIMITED_INFORMATION, False, pid)
+        if handle:
+            ctypes.windll.kernel32.CloseHandle(handle)
+            return True
+        return ctypes.get_last_error() not in (87, 128)  # 87/128 = 进程不存在
     try:
         os.kill(pid, 0)
         return True
@@ -55,34 +59,58 @@ def acquire_single_instance(lock_file: Path, name: str) -> bool:
 
     失败返回 False 时调用方应直接退出（不执行注册/授权逻辑）。
     锁文件无法创建等异常按“放行”处理（fail-open），避免误伤正常流程。
+
+    并发安全说明（2026-08-12 实战修复）：
+    原实现存在竞态窗口——进程 A 用 O_CREAT|O_EXCL 创建锁文件后、
+    写入 PID 之前，进程 B 读到空文件 → pid=0 → 误判为陈旧锁 → 删除并
+    抢到锁，导致双实例并发（曾引发注册双批次事故）。修复：
+      1. 创建后立即写入 PID（缩小窗口）；写入失败则回滚删除锁文件
+      2. 读到空/非数字 PID 时视为“可能创建中”，绝不删除，等待后重试
+      3. 只有 PID 有效且确认进程已死亡时才清理陈旧锁
     """
     lock_file = Path(lock_file)
     try:
         lock_file.parent.mkdir(parents=True, exist_ok=True)
     except OSError:
         pass
-    for _ in range(3):
+    for attempt in range(5):
         try:
             fd = os.open(lock_file, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
         except FileExistsError:
             try:
-                pid = int((lock_file.read_text(encoding="utf-8") or "0").strip() or "0")
+                raw = lock_file.read_text(encoding="utf-8", errors="ignore")
+                pid = int((raw or "0").strip() or "0")
             except (OSError, ValueError):
-                pid = 0
-            if _pid_alive(pid):
-                print(f"[!] 已有 {name} 进程在运行 (PID={pid})，本次启动取消。", flush=True)
-                return False
-            # 陈旧锁：进程已死，删除后重试
-            try:
-                lock_file.unlink()
-            except OSError:
-                pass
+                pid = -1
+            if pid > 0:
+                if _pid_alive(pid):
+                    print(f"[!] 已有 {name} 进程在运行 (PID={pid})，本次启动取消。", flush=True)
+                    return False
+                # 陈旧锁：进程已死，删除后重试
+                try:
+                    lock_file.unlink()
+                except OSError:
+                    pass
+            else:
+                # pid 为空/非法：可能对方正在创建中，退避重试，绝不删除
+                time.sleep(0.3 * (attempt + 1))
             continue
         except OSError as exc:
             print(f"[!] 单实例锁异常（{exc}），继续运行。", flush=True)
             return True
-        with os.fdopen(fd, "w", encoding="utf-8") as fh:
-            fh.write(str(os.getpid()))
+        # 创建成功：立即写入 PID（缩短竞态窗口）
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as fh:
+                fh.write(str(os.getpid()))
+                fh.flush()
+                os.fsync(fh.fileno())
+        except OSError:
+            # 写入失败：回滚删除锁文件，避免留下不可用锁
+            try:
+                lock_file.unlink()
+            except OSError:
+                pass
+            return True
         atexit.register(_release, lock_file)
         return True
     print(f"[!] 无法获取 {name} 单实例锁，本次启动取消。", flush=True)

@@ -27,8 +27,6 @@ DEFAULT_SOURCE = ROOT / "keys" / "auth-sessions.jsonl"
 DEFAULT_LEDGER = ROOT / "keys" / "cpa-enroll-ledger.jsonl"
 DEFAULT_JSON_OUT = ROOT / "keys" / "oauth_enroll_last.json"
 
-LOCK_FILE = ROOT / "keys" / ".lock-auth"
-
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p = argparse.ArgumentParser(
@@ -79,20 +77,16 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         action="store_true",
         help="授权后自动导入本地 Grok2API",
     )
+    p.add_argument(
+        "--quiet-skip",
+        action="store_true",
+        help="不逐条输出 SKIP 日志，减少刷屏",
+    )
     return p.parse_args(argv)
 
 
 def main(argv: list[str] | None = None) -> int:
     args = parse_args(argv)
-
-    # 单实例锁：防止重复启动导致双批次并发写同一台账/CPA
-    try:
-        from scripts.single_instance import acquire_single_instance
-
-        if not acquire_single_instance(LOCK_FILE, "授权"):
-            return 3
-    except Exception as exc:
-        print(f"[!] 单实例锁不可用（{exc}），继续运行", flush=True)
 
     force = bool(args.force)
     count_raw = str(args.count or "0").strip()
@@ -165,6 +159,8 @@ def main(argv: list[str] | None = None) -> int:
         cmd.extend(["--force-reauth", "--retry-failed"])
     else:
         cmd.extend(["--skip-existing", "--skip-failed", "--retry-legacy-fails"])
+    if args.quiet_skip:
+        cmd.append("--quiet-skip")
 
     print("=" * 40, flush=True)
     print("  授权脚本  auth-code / grok-build", flush=True)

@@ -3382,6 +3382,25 @@ async def main():
     return 0
 
 if __name__ == "__main__":
+    # 单实例锁：无论从 注册.py wrapper、start.sh 还是 python -m 直接启动，
+    # 都收敛到核心模块持锁，跨入口互斥（防止双批次并发写同一 SSO 文件）。
+    try:
+        from scripts.single_instance import acquire_single_instance
+
+        if not acquire_single_instance(Path("keys") / ".lock-register", "注册"):
+            raise SystemExit(3)
+    except SystemExit:
+        raise
+    except Exception as exc:
+        log(f"[!] 单实例锁不可用（{exc}），继续运行")
+    try:
+        from scripts.cleanup_browsers import cleanup_stale_browsers
+
+        n = cleanup_stale_browsers()
+        if n:
+            log(f"[cleanup] {n} stale browser process(es) terminated")
+    except Exception:
+        pass
     try:
         REGISTER_LOG_MODE = resolve_register_log_mode(sys.argv[1:])
     except ValueError:

@@ -10,6 +10,8 @@ from dataclasses import replace
 
 import httpx
 
+from .auth_code import ConvertError  # noqa: E402  (also used by _authorize)
+
 from .models import (
     AuthorizationStatus,
     CompletionJob,
@@ -563,7 +565,7 @@ class AuthPipeline:
             if self.oauth_mode == "auth_code":
                 self._authorization_cancellable = False
                 try:
-                    from .auth_code import ConvertError, convert_one
+                    from .auth_code import convert_one
 
                     entry = await asyncio.to_thread(
                         convert_one,
@@ -597,6 +599,8 @@ class AuthPipeline:
                     if "access_denied" in low or "sso" in low and "过期" in reason:
                         status = JobStatus.SOURCE_INVALID if "过期" in reason or "sign-in" in low else JobStatus.OAUTH_DENIED
                     await self.rate_gate.inconclusive(probe_token)
+                    # permanent=True（4xx invalid_grant 等）→ 永久失败不重试；
+                    # permanent=False（5xx/429/网络）→ 瞬时故障可重试
                     await self._finish_failure(
                         prepared.source,
                         prepared.source_fingerprint,
@@ -604,7 +608,7 @@ class AuthPipeline:
                         prepared.attempt_number,
                         status,
                         "auth_code_rejected" if status is JobStatus.OAUTH_REJECTED else status.value,
-                        retry=False,
+                        retry=not error.permanent,
                         task_number=prepared.task_number,
                     )
                     return

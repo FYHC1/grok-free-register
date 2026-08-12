@@ -125,6 +125,7 @@ def load_auth_documents(
         paths = sorted(auth_dir.glob("xai-*.json"))
 
     docs: list[tuple[str, dict[str, Any]]] = []
+    seen_emails: set[str] = set()
     for p in paths:
         try:
             doc = json.loads(p.read_text(encoding="utf-8", errors="ignore"))
@@ -140,6 +141,11 @@ def load_auth_documents(
         if not sso:
             log(f"[skip] {p.name}: missing sso field")
             continue
+        if email and email in seen_emails:
+            log(f"[skip] {p.name}: duplicate email {email} (already queued)")
+            continue
+        if email:
+            seen_emails.add(email)
         docs.append((p.name, doc))
         if limit > 0 and len(docs) >= limit:
             break

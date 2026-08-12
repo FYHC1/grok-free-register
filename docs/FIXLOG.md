@@ -4,6 +4,41 @@
 
 ---
 
+## 2026-08-12 · 8. ⚠️ P1-4 误删 Grok2API 账号类型记录（重要教训）
+
+- **状态**：⚠️ 部分数据被误删，恢复方案已确认（用户界面重新转换）
+- **背景**：Grok2API 账号有**类型体系**：`provider` 字段区分 `grok_web` / `grok_build` / `grok_console`。账号导入时默认是 **web** 类型；可通过界面**转换为 build 或 console**（转换是"新增"语义——转换后原 web 记录保留，web+build/console 共存；同一 email 可有多个 provider 类型记录，属**正常状态**，不是重复）。
+- **转换方向限制**：只能 `web → build/console`，**不能** `console → web`。因此 web 类型是"基础类型"，一旦丢失只能重新导入恢复。
+- **误删经过**：P1-4 实施"Grok2API 重复账号治理"时，临时清理脚本按 **email 去重**（保留最新 id 删旧记录），**未区分 provider 类型**——把同 email 的 build/console 类型记录当成重复删除：
+  - `grok_build`：129 → 0（全部被删）
+  - 43 个账号只剩 grok_web 类型，缺 build/console
+  - 641 条 → 251 条，删除 390 条中含大量不同类型的有效记录
+- **数据完整性确认**：
+  - 本地 `auth-local/authenticated/` 268 个账号文件全部完好（含 SSO）
+  - Grok2API 中每个 email 至少有一条记录（0 完全缺失）
+  - 43 个缺类型的账号清单：`keys/need_convert_emails.txt`
+- **恢复方案**（用户已确认）：在 Grok2API 界面把这 43 个 grok_web 账号转换为 build/console；另需重新上传 225 个 web 类型账号（对应现有 225 个 console 账号，它们缺 web 基础类型）。
+- **教训**（重要）：
+  1. **Grok2API 服务端数据不做自动删除/去重**——同 email 多 provider 记录是账号类型的正常表现，不是重复
+  2. 清理前必须理解数据模型（provider 类型体系），按 `(email, provider)` 维度审视，而非仅 email
+  3. 破坏性操作前先备份（本次教训：临时脚本已删，但删掉的记录无法从 Grok2API 恢复，只能靠本地 SSO 重新导入+转换）
+  4. 涉及用户管理的服务端数据（Grok2API 账号类型），清理前必须与用户确认
+
+---
+
+## 2026-08-12 · 7. P0/P1 优化完成（锁/台账/OAuth/去重/浏览器/重试）
+
+- **状态**：✅ 已实施并逐轮验证（每轮注册 4+ 账号完整闭环：注册→授权→CPA→Grok2API）
+- **P0-1 锁体系统一**：修复 `single_instance.py` 竞态（Windows tasklist 登记延迟→改用 `OpenProcess` 同步 API）；锁下沉到核心模块（`grok_register/register.py` / `sso_auth_code_enroll.py` 的 `__main__`），wrapper/start.sh/`-m` 三路收敛互斥；附带修复 5 个 .sh 文件 CRLF→LF
+- **P0-2 台账集中化**：新建 `scripts/ledger_store.py`（`claim()` 锁内原子认领 + processing 占位 + `append()` 覆盖），sso/cpa 接入；并发测试 4 进程抢同一 email 只有 1 处理
+- **P1-3 OAuth 错误分类**：`ConvertError.permanent` 属性；4xx 永久失败、5xx/429 瞬时重试；瞬时不记 fail 台账
+- **P1-4 Grok2API 重复治理**：导入前本地按 email 去重（合理）；**但服务端清理脚本误删类型记录，见第 8 条**
+- **P1-5 浏览器残留清理**：新建 `scripts/cleanup_browsers.py`（Windows 按>60s 年龄 / POSIX 按孤儿进程），接入注册/授权/cpa 三入口
+- **P1-6 httpx 重试**：新建 `scripts/httpx_retry.py`（5xx/429/连接错误指数退避重试、4xx 不重试），CPAClient 全部调用点接入
+- **验证**：验证轮 1-6 全部通过（ok=5~6/fail=0，Grok2API created=5~6 无重复，CPA 全部 done）
+
+---
+
 ## 2026-08-12 · 6. 代码 review 发现并修复 6 类问题（含优化计划清单）
 
 - **状态**：✅ 已修复并验证；优化计划保留待实施

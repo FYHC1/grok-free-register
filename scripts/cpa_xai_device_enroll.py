@@ -333,10 +333,21 @@ class CPAClient:
     def _url(self, path: str) -> str:
         return f"{self.base_url}{path}"
 
+    def _get(self, path: str, **kwargs) -> Any:
+        """带瞬态重试的 GET。"""
+        from scripts.httpx_retry import retry_call
+
+        return retry_call(self.client.get, self._url(path), **kwargs)
+
+    def _post(self, path: str, **kwargs) -> Any:
+        from scripts.httpx_retry import retry_call
+
+        return retry_call(self.client.post, self._url(path), **kwargs)
+
     def start_xai_device_flow(self) -> dict[str, Any]:
         # CPA: GET /v0/management/xai-auth-url
         # returns {status,url,state,flow,user_code,expires_in}
-        r = self.client.get(self._url("/v0/management/xai-auth-url"))
+        r = self._get("/v0/management/xai-auth-url")
         try:
             data = r.json()
         except Exception:
@@ -348,8 +359,8 @@ class CPAClient:
         return data
 
     def get_auth_status(self, state: str) -> dict[str, Any]:
-        r = self.client.get(
-            self._url("/v0/management/get-auth-status"),
+        r = self._get(
+            "/v0/management/get-auth-status",
             params={"state": state},
         )
         try:
@@ -375,7 +386,7 @@ class CPAClient:
         return last
 
     def list_auth_files(self) -> list[dict[str, Any]]:
-        r = self.client.get(self._url("/v0/management/auth-files"))
+        r = self._get("/v0/management/auth-files")
         if r.status_code // 100 != 2:
             raise RuntimeError(f"list auth-files failed: {r.status_code} {r.text[:300]}")
         data = r.json()
@@ -385,8 +396,8 @@ class CPAClient:
     def download_auth_file(self, name: str) -> bytes:
         if not name.endswith(".json"):
             name = f"{name}.json"
-        r = self.client.get(
-            self._url("/v0/management/auth-files/download"),
+        r = self._get(
+            "/v0/management/auth-files/download",
             params={"name": name},
         )
         if r.status_code // 100 != 2:
@@ -396,8 +407,8 @@ class CPAClient:
     def upload_auth_file(self, name: str, document: dict[str, Any]) -> None:
         if not name.endswith(".json"):
             name = f"{name}.json"
-        r = self.client.post(
-            self._url(f"/v0/management/auth-files?{urlencode({'name': name})}"),
+        r = self._post(
+            f"/v0/management/auth-files?{urlencode({'name': name})}",
             headers={**auth_headers(self.secret), "Content-Type": "application/json"},
             content=json.dumps(document, ensure_ascii=False).encode("utf-8"),
         )
@@ -858,6 +869,15 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def main(argv: list[str] | None = None) -> int:
+    # 启动前清理上次异常退出残留的浏览器进程（auth_code 模式转发到 sso，那里也清理）
+    try:
+        from scripts.cleanup_browsers import cleanup_stale_browsers
+
+        n = cleanup_stale_browsers()
+        if n:
+            log(f"[cleanup] {n} stale browser process(es) terminated")
+    except Exception:
+        pass
     # Default path is proven Auth Code + PKCE (referrer=grok-build).
     # Keep --mode device for the old CPA device-flow browser path.
     pre = argparse.ArgumentParser(add_help=False)
@@ -924,9 +944,33 @@ def main(argv: list[str] | None = None) -> int:
         idx = args.index
         attempted = 0
         target = max(1, args.count)
+        store = None
+        if use_ledger and ledger_path is not None:
+            from scripts.ledger_store import LedgerStore
+
+            store = LedgerStore(ledger_path)
         while attempted < target and idx < len(records):
             source = records[idx]
             email_l = normalize_email(source.source_id)
+            if store is not None:
+                ledger_status = store.claim(email_l, skip_existing=skip_existing, skip_failed=skip_failed)
+                if ledger_status == "ok":
+                    skip_n += 1
+                    log(f"[SKIP] index={idx} email={source.source_id} already ok (ledger)")
+                    idx += 1
+                    continue
+                if ledger_status == "fail":
+                    prev = store.last(email_l)
+                    prev_err = str(prev.get("error") or prev.get("stage") or "fail")[:120]
+                    skip_n += 1
+                    log(f"[SKIP] index={idx} email={source.source_id} previous fail in ledger ({prev_err})")
+                    idx += 1
+                    continue
+                if ledger_status == "processing":
+                    skip_n += 1
+                    log(f"[SKIP] index={idx} email={source.source_id} processing in another instance")
+                    idx += 1
+                    continue
             if skip_existing and email_l in existing:
                 skip_n += 1
                 log(f"[SKIP] index={idx} email={source.source_id} already in CPA/local/ledger-ok")
@@ -968,7 +1012,16 @@ def main(argv: list[str] | None = None) -> int:
                 if email_l:
                     existing.add(email_l)
                     failed.discard(email_l)
-                if use_ledger and ledger_path is not None and email_l:
+                if store is not None and email_l:
+                    store.append(
+                        email=email_l,
+                        status="ok",
+                        stage=str(result.get("stage") or "done"),
+                        error="",
+                        index=idx,
+                        extra={"user_code": result.get("user_code") or "", "source_file": str(source_path)},
+                    )
+                elif use_ledger and ledger_path is not None and email_l:
                     append_enroll_ledger(
                         ledger_path,
                         email=email_l,
@@ -985,7 +1038,16 @@ def main(argv: list[str] | None = None) -> int:
                 fail_n += 1
                 consecutive_fail += 1
                 log(f"[FAIL] {source.source_id} stage={result.get('stage')} error={result.get('error')}")
-                if use_ledger and ledger_path is not None and email_l:
+                if store is not None and email_l:
+                    store.append(
+                        email=email_l,
+                        status="fail",
+                        stage=str(result.get("stage") or ""),
+                        error=str(result.get("error") or ""),
+                        index=idx,
+                        extra={"user_code": result.get("user_code") or "", "source_file": str(source_path)},
+                    )
+                elif use_ledger and ledger_path is not None and email_l:
                     append_enroll_ledger(
                         ledger_path,
                         email=email_l,

@@ -94,6 +94,9 @@ EMAIL_MODE=tempmail
 # 授权后自动导入 Grok2API（需 .env 配置 GROK2API_ADMIN_USER / GROK2API_ADMIN_PASS / GROK2API_ADMIN_BASE）
 # 不带 --force 时会跳过已授权账号，直接扫描导入 auth-local/authenticated/ 下已有文件
 .\.venv\Scripts\python.exe -u .\授权.py --import-grok2api
+
+# 跳过日志静默：不逐条输出 [SKIP]（仍保留 skip 计数），大量已授权账号时减少刷屏
+.\.venv\Scripts\python.exe -u .\授权.py --quiet-skip
 ```
 
 英文入口：`register.py` / `auth.py`（或 `register.cmd` / `auth.cmd`）。

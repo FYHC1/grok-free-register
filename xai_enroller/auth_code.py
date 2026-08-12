@@ -159,7 +159,16 @@ def _debug_dump_consent_html(html: str, final_url: str) -> None:
 
 
 class ConvertError(Exception):
-    pass
+    """OAuth 转换失败。
+
+    permanent=True 表示永久性错误（4xx：invalid_grant/invalid_client 等，
+    重试无意义，应标记失败跳过）；False（默认）表示瞬时错误（5xx/429/
+    网络抖动，可重试）。
+    """
+
+    def __init__(self, message: str, *, permanent: bool = False):
+        super().__init__(message)
+        self.permanent = permanent
 
 
 def b64url(data: bytes) -> str:
@@ -549,7 +558,13 @@ def _run_sso_exchange(session, sso: str) -> dict:
         raise ConvertError(f"token 请求失败: {e}") from e
 
     if tres.status_code < 200 or tres.status_code >= 300:
-        raise ConvertError(f"token HTTP {tres.status_code}: {tres.text[:300]}")
+        # 4xx（invalid_grant/invalid_client/access_denied）是永久错误，重试无意义；
+        # 5xx/429 是瞬时错误，可重试。
+        permanent = 400 <= tres.status_code < 500
+        raise ConvertError(
+            f"token HTTP {tres.status_code}: {tres.text[:300]}",
+            permanent=permanent,
+        )
 
     try:
         token = tres.json()

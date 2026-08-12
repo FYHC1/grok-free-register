@@ -408,7 +408,8 @@ def enroll_one(email: str, sso: str, *, proxy: str, auth_dir: Path, cpa: CPAClie
         entry = convert_one(sso, email=email, proxy=proxy)
     except ConvertError as exc:
         out["error"] = str(exc)
-        out["stage"] = "convert_failed"
+        # permanent=True（4xx invalid_grant）→ 永久失败；False（5xx/网络）→ 瞬时，下次可重试
+        out["stage"] = "convert_failed" if exc.permanent else "convert_temporary"
         return out
     except Exception as exc:
         out["error"] = f"{type(exc).__name__}:{exc}"
@@ -483,6 +484,11 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--max-consecutive-fail", type=int, default=0)
     p.add_argument("--json-out", default="")
     p.add_argument("--import-grok2api", action="store_true", help="import authorized json into local Grok2API")
+    p.add_argument(
+        "--quiet-skip",
+        action="store_true",
+        help="不逐条输出 SKIP 日志（仅保留计数），减少刷屏",
+    )
     return p
 
 
@@ -530,6 +536,15 @@ def maybe_import_grok2api(paths: list[Path]) -> dict[str, Any]:
 
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
+    # 启动前清理上次异常退出残留的浏览器进程
+    try:
+        from scripts.cleanup_browsers import cleanup_stale_browsers
+
+        n = cleanup_stale_browsers()
+        if n:
+            log(f"[cleanup] {n} stale browser process(es) terminated")
+    except Exception:
+        pass
     if args.email_domain:
         os.environ["XAI_ENROLLER_ALLOWED_EMAIL_DOMAIN"] = args.email_domain.strip()
     domain = ",".join(allowed_email_domains())
@@ -602,6 +617,7 @@ def main(argv: list[str] | None = None) -> int:
 
     import_grok2api = bool(getattr(args, "import_grok2api", False))
     imported_paths: list[Path] = []
+    quiet_skip = bool(getattr(args, "quiet_skip", False))
 
     ok_n = fail_n = skip_n = 0
     results: list[dict[str, Any]] = []
@@ -628,35 +644,57 @@ def main(argv: list[str] | None = None) -> int:
         idx = args.index
         attempted = 0
         target = max(1, int(args.count))
+        store = None
+        if use_ledger and ledger_path is not None:
+            from scripts.ledger_store import LedgerStore
+
+            store = LedgerStore(ledger_path)
         while attempted < target and idx < len(records):
             rec = records[idx]
             email = rec["email"]
             email_l = normalize_email(email)
-            if skip_existing and email_l in existing:
-                skip_n += 1
-                log(f"[SKIP] index={idx} email={email} already ok/local/CPA")
-                idx += 1
-                continue
-            if skip_failed and email_l in failed:
-                prev = ledger_latest.get(email_l) or {}
-                prev_err = str(prev.get("error") or prev.get("stage") or "fail")
-                legacy_markers = (
-                    "browser_",
-                    "invalid_grant",
-                    "access denied",
-                    "cpa_status",
-                    "device_",
-                    "oauth_rejected",
-                    "cpa_failed",
-                )
-                is_legacy = any(m in prev_err.lower() for m in legacy_markers)
-                if retry_legacy_fails and is_legacy:
-                    log(f"[RETRY-LEGACY] index={idx} email={email} previous={prev_err[:120]}")
-                else:
+            # 台账状态用锁内原子认领（替代启动快照），消除并发下重复处理
+            if store is not None:
+                ledger_status = store.claim(email_l, skip_existing=skip_existing, skip_failed=skip_failed)
+                if ledger_status == "ok":
                     skip_n += 1
-                    log(f"[SKIP] index={idx} email={email} previous fail ({prev_err[:120]})")
+                    if not quiet_skip:
+                        log(f"[SKIP] index={idx} email={email} already ok (ledger)")
                     idx += 1
                     continue
+                if ledger_status == "fail":
+                    prev = store.last(email_l)
+                    prev_err = str(prev.get("error") or prev.get("stage") or "fail")
+                    legacy_markers = (
+                        "browser_",
+                        "invalid_grant",
+                        "access denied",
+                        "cpa_status",
+                        "device_",
+                        "oauth_rejected",
+                        "cpa_failed",
+                    )
+                    is_legacy = any(m in prev_err.lower() for m in legacy_markers)
+                    if retry_legacy_fails and is_legacy:
+                        log(f"[RETRY-LEGACY] index={idx} email={email} previous={prev_err[:120]}")
+                    else:
+                        skip_n += 1
+                        if not quiet_skip:
+                            log(f"[SKIP] index={idx} email={email} previous fail ({prev_err[:120]})")
+                        idx += 1
+                        continue
+                if ledger_status == "processing":
+                    skip_n += 1
+                    if not quiet_skip:
+                        log(f"[SKIP] index={idx} email={email} processing in another instance")
+                    idx += 1
+                    continue
+            if skip_existing and email_l in existing:
+                skip_n += 1
+                if not quiet_skip:
+                    log(f"[SKIP] index={idx} email={email} already ok/local/CPA")
+                idx += 1
+                continue
 
             log(f"\n===== enroll index={idx} email={email} =====")
             result = enroll_one(
@@ -674,7 +712,9 @@ def main(argv: list[str] | None = None) -> int:
                 consecutive_fail = 0
                 existing.add(email_l)
                 failed.discard(email_l)
-                if use_ledger and ledger_path is not None:
+                if store is not None:
+                    store.append(email=email_l, status="ok", stage="done", index=idx)
+                elif use_ledger and ledger_path is not None:
                     append_ledger(ledger_path, email=email_l, status="ok", stage="done", index=idx)
                 path_str = str(result.get("path") or "")
                 if import_grok2api and path_str:
@@ -683,17 +723,31 @@ def main(argv: list[str] | None = None) -> int:
             else:
                 fail_n += 1
                 consecutive_fail += 1
-                if use_ledger and ledger_path is not None:
-                    append_ledger(
-                        ledger_path,
-                        email=email_l,
-                        status="fail",
-                        stage=str(result.get("stage") or ""),
-                        error=str(result.get("error") or ""),
-                        index=idx,
-                    )
-                failed.add(email_l)
-                log(f"[FAIL] {email} stage={result.get('stage')} error={result.get('error')}")
+                stage = str(result.get("stage") or "")
+                # convert_temporary（5xx/网络等瞬时错误）不写 fail 台账，
+                # 避免被 skip_failed 永久跳过；下次运行可重试
+                if stage == "convert_temporary":
+                    log(f"[TEMP] {email} stage={stage} error={result.get('error')} (瞬时错误，不记失败)")
+                else:
+                    if store is not None:
+                        store.append(
+                            email=email_l,
+                            status="fail",
+                            stage=stage,
+                            error=str(result.get("error") or ""),
+                            index=idx,
+                        )
+                    elif use_ledger and ledger_path is not None:
+                        append_ledger(
+                            ledger_path,
+                            email=email_l,
+                            status="fail",
+                            stage=stage,
+                            error=str(result.get("error") or ""),
+                            index=idx,
+                        )
+                    failed.add(email_l)
+                log(f"[FAIL] {email} stage={stage} error={result.get('error')}")
                 if max_consecutive_fail > 0 and consecutive_fail >= max_consecutive_fail:
                     log(f"[STOP] max consecutive fail {consecutive_fail}")
                     break
@@ -734,4 +788,14 @@ def main(argv: list[str] | None = None) -> int:
 
 
 if __name__ == "__main__":
+    # 单实例锁：与 授权.py wrapper 共用 .lock-auth，跨入口互斥
+    try:
+        from scripts.single_instance import acquire_single_instance
+
+        if not acquire_single_instance(ROOT / "keys" / ".lock-auth", "授权"):
+            raise SystemExit(3)
+    except SystemExit:
+        raise
+    except Exception as exc:
+        log(f"[!] 单实例锁不可用（{exc}），继续运行")
     raise SystemExit(main())
